@@ -1,0 +1,104 @@
+import tensorflow as tf
+from tensorflow.keras.applications import VGG16, InceptionV3, ResNet50
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout, Input
+from tensorflow.keras.utils import to_categorical
+from sklearn.neural_network import BernoulliRBM
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import numpy as np
+import os
+
+# === 1. Load Dataset ===
+def load_dataset(data_dir, img_size=(224, 224)):
+    dataset = tf.keras.preprocessing.image_dataset_from_directory(
+        data_dir,
+        image_size=img_size,
+        batch_size=32,
+        label_mode='int',
+        shuffle=True
+    )
+    class_names = dataset.class_names
+    images, labels = [], []
+    for batch_images, batch_labels in dataset:
+        images.append(batch_images.numpy())
+        labels.append(batch_labels.numpy())
+    X = np.concatenate(images, axis=0)
+    y = np.concatenate(labels, axis=0)
+    return X, y, class_names
+
+train_dir = "D:/me/project data set final sem/archive (2)/Training"
+test_dir = "D:/me/project data set final sem/archive (2)/Testing"
+
+X_train_img, y_train, class_names = load_dataset(train_dir)
+X_test_img, y_test, _ = load_dataset(test_dir)
+
+# One-hot encode labels
+y_train_cat = to_categorical(y_train, num_classes=len(class_names))
+y_test_cat = to_categorical(y_test, num_classes=len(class_names))
+
+# === 2. Load Pre-trained Models ===
+def create_feature_model(base_model):
+    output = GlobalAveragePooling2D()(base_model.output)
+    return Model(inputs=base_model.input, outputs=output)
+
+vgg_model = create_feature_model(VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3)))
+inc_model = create_feature_model(InceptionV3(weights='imagenet', include_top=False, input_shape=(224, 224, 3)))
+resnet_model = create_feature_model(ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3)))
+
+# === 3. Extract Features ===
+def extract_features(model, X):
+    return model.predict(X, verbose=1)
+
+X_train_vgg = extract_features(vgg_model, X_train_img)
+X_train_inc = extract_features(inc_model, X_train_img)
+X_train_res = extract_features(resnet_model, X_train_img)
+
+X_test_vgg = extract_features(vgg_model, X_test_img)
+X_test_inc = extract_features(inc_model, X_test_img)
+X_test_res = extract_features(resnet_model, X_test_img)
+
+# === 4. Combine & Normalize Features ===
+X_train_combined = np.concatenate([X_train_vgg, X_train_inc, X_train_res], axis=1)
+X_test_combined = np.concatenate([X_test_vgg, X_test_inc, X_test_res], axis=1)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_combined)
+X_test_scaled = scaler.transform(X_test_combined)
+
+# === 5. Apply Deep Belief Network (Stacked RBMs) ===
+rbm1 = BernoulliRBM(n_components=512, learning_rate=0.01, n_iter=10, random_state=42)
+rbm2 = BernoulliRBM(n_components=256, learning_rate=0.01, n_iter=10, random_state=42)
+
+X_train_rbm1 = rbm1.fit_transform(X_train_scaled)
+X_train_rbm2 = rbm2.fit_transform(X_train_rbm1)
+
+X_test_rbm1 = rbm1.transform(X_test_scaled)
+X_test_rbm2 = rbm2.transform(X_test_rbm1)
+
+# === 6. Final Keras Classifier Model ===
+input_dbn = Input(shape=(256,))
+x = Dense(128, activation='relu')(input_dbn)
+x = Dropout(0.4)(x)
+x = Dense(64, activation='relu')(x)
+output = Dense(len(class_names), activation='softmax')(x)
+
+final_model = Model(inputs=input_dbn, outputs=output)
+final_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# === 7. Train Final Model ===
+final_model.fit(
+    X_train_rbm2, y_train_cat,
+    validation_data=(X_test_rbm2, y_test_cat),
+    epochs=10,
+    batch_size=32
+)
+
+# === 8. Save the Keras Model (.h5) ===
+final_model.save("brain_tumor_final_model.h5")
+print("✅ Saved model as 'brain_tumor_final_model.h5'")
+
+# Optional: Save the RBMs and scaler for inference
+import joblib
+joblib.dump((rbm1, rbm2, scaler), "dbn_scaler_pipeline.pkl")
+print("✅ Saved DBN pipeline as 'dbn_scaler_pipeline.pkl'")
